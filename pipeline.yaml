@@ -1,0 +1,158 @@
+trigger:
+  branches:
+    include:
+      - master
+      # - develop
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Stage1
+    displayName: 'Build and Push Image'
+    jobs:
+      - job: Job
+        steps:
+        - checkout: self
+          fetchDepth: 0
+
+        - task: NodeTool@0
+          inputs:
+            versionSource: 'spec'
+            versionSpec: '20.x'
+            checkLatest: true
+          displayName: 'Install Node.js 20.x'
+
+        - script: |
+            npm install
+            npm run build
+          displayName: 'NPM Install and NPM Run Build'
+
+        - script: |
+            echo "##vso[task.setvariable variable=CONTAINER_TAG]$(Build.SourceBranchName)-$(echo $(Build.SourceVersion) | cut -c 1-8)"
+            echo "##vso[task.setvariable variable=PROJECT_NAME]$(echo $(System.TeamProject) | tr '[:upper:]' '[:lower:]')"
+          displayName: 'Setting variables'
+
+        - task: Docker@2
+          inputs:
+            repository: '062224190872.dkr.ecr.us-east-2.amazonaws.com/$(PROJECT_NAME)'
+            command: 'build'
+            Dockerfile: 'Dockerfile'
+            tags: '$(CONTAINER_TAG)'
+          displayName: 'Building docker image'
+
+        - task: ECRPushImage@1
+          inputs:
+            awsCredentials: 'AWS'
+            regionName: 'us-east-2'
+            imageSource: 'imagename'
+            sourceImageName: '062224190872.dkr.ecr.us-east-2.amazonaws.com/$(PROJECT_NAME)'
+            sourceImageTag: '$(CONTAINER_TAG)'
+            repositoryName: '$(PROJECT_NAME)'
+            pushTag: '$(CONTAINER_TAG)'
+            autoCreateRepository: true
+          displayName: 'Pushing docker image'
+
+  - stage: ArgoCD
+    displayName: 'Change tag on ArgoCD GIT'
+    dependsOn: Stage1
+    jobs:
+      - job: ArgoCD
+        condition: or(
+          and(succeeded(), contains(variables['Build.SourceBranch'], 'dev')),
+          and(succeeded(), contains(variables['Build.SourceBranch'], 'homolog')),
+          and(succeeded(), contains(variables['Build.SourceBranch'], 'hml')))
+        displayName: 'ArgoCD GIT'
+        steps:
+        - script: |
+            echo "##vso[task.setvariable variable=CONTAINER_TAG]$(Build.SourceBranchName)-$(echo $(Build.SourceVersion) | cut -c 1-8)"
+            echo "##vso[task.setvariable variable=PROJECT_NAME]$(echo $(System.TeamProject) | tr '[:upper:]' '[:lower:]')"
+          displayName: 'Setting variables'
+        - task: DownloadSecureFile@1
+          name: sshKey
+          inputs:
+            secureFile: 'id_rsa'
+          displayName: 'Downloading SSH key'
+
+        - script: |
+            mkdir -p ~/.ssh
+            cp $(sshKey.secureFilePath) ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            ssh-keyscan -t rsa dev.azure.com >> ~/.ssh/known_hosts
+            git config --global url."ssh://git@ssh.dev.azure.com/v3/".insteadOf "https://dev.azure.com/"
+            echo "Cloning Pollvo.Applications.EKS repository..."
+            git clone git@ssh.dev.azure.com:v3/RSMBrasilAcal/Pollvo.Applications.EKS/Pollvo.Applications.EKS
+            cd Pollvo.Applications.EKS
+            sed -i "s|image:.*|image: 062224190872.dkr.ecr.us-east-2.amazonaws.com/$PROJECT_NAME:$CONTAINER_TAG|g" $(System.TeamProject)/values/$(Build.SourceBranchName).yaml
+
+            git config user.email "infra.acl@rsmbr.com"
+            git config user.name "Azure Devops"
+
+            echo "Committing changes..."
+            git add .
+            git commit -m "Project: $PROJECT_NAME; Branch: $(Build.SourceBranchName); Commit: $(echo $(Build.SourceVersion) | cut -c 1-8)"
+            
+            echo "Pushing changes to Pollvo.Applications.EKS..."
+            git push origin main
+
+          displayName: 'Alter manifests on from Pollvo.Applications.EKS'
+
+      - job: Approval
+        condition: or(
+          and(succeeded(), contains(variables['Build.SourceBranch'], 'main')),
+          and(succeeded(), contains(variables['Build.SourceBranch'], 'master')))
+        pool: server
+        timeoutInMinutes: 240
+        steps:
+        - task: ManualValidation@1
+          inputs:
+            notifyUsers: 'guilherme.santos@rsmbrasil.com.br'
+            approvers: 'guilherme.santos@rsmbrasil.com.br,jose.sousa@rsmbrasil.com.br'
+          displayName: 'Ap - Guilherme Santos'
+        - task: ManualValidation@1
+          inputs:
+            notifyUsers: 'jose.sousa@rsmbrasil.com.br'
+            approvers: 'jose.sousa@rsmbrasil.com.br,filipe.petruccelli@rsmbrasil.com.br'
+          displayName: 'Ap - Jose Sousa'
+        - task: ManualValidation@1
+          inputs:
+            notifyUsers: 'filipe.petruccelli@rsmbrasil.com.br'
+            approvers: 'filipe.petruccelli@rsmbrasil.com.br,jose.sousa@rsmbrasil.com.br'
+          displayName: 'Ap - Filipe Petruccelli'
+          
+      - job: ArgoCD_PRD
+        displayName: 'ArgoCD GIT'
+        dependsOn: Approval
+        steps:
+        - script: |
+            echo "##vso[task.setvariable variable=CONTAINER_TAG]$(Build.SourceBranchName)-$(echo $(Build.SourceVersion) | cut -c 1-8)"
+            echo "##vso[task.setvariable variable=PROJECT_NAME]$(echo $(System.TeamProject) | tr '[:upper:]' '[:lower:]')"
+          displayName: 'Setting variables'
+        - task: DownloadSecureFile@1
+          name: sshKey
+          inputs:
+            secureFile: 'id_rsa'
+          displayName: 'Downloading SSH key'
+
+        - script: |
+            mkdir -p ~/.ssh
+            cp $(sshKey.secureFilePath) ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+            ssh-keyscan -t rsa dev.azure.com >> ~/.ssh/known_hosts
+            git config --global url."ssh://git@ssh.dev.azure.com/v3/".insteadOf "https://dev.azure.com/"
+            echo "Cloning Pollvo.Applications.EKS repository..."
+            git clone git@ssh.dev.azure.com:v3/RSMBrasilAcal/Pollvo.Applications.EKS/Pollvo.Applications.EKS
+            cd Pollvo.Applications.EKS
+            sed -i "s|image:.*|image: 062224190872.dkr.ecr.us-east-2.amazonaws.com/$PROJECT_NAME:$CONTAINER_TAG|g" $(System.TeamProject)/values/$(Build.SourceBranchName).yaml
+
+            git config user.email "infra.acl@rsmbr.com"
+            git config user.name "Azure Devops"
+
+            echo "Committing changes..."
+            git add .
+            git commit -m "Project: $PROJECT_NAME; Branch: $(Build.SourceBranchName); Commit: $(echo $(Build.SourceVersion) | cut -c 1-8)"
+            
+            echo "Pushing changes to Pollvo.Applications.EKS..."
+            git push origin main
+
+          displayName: 'Alter manifests on from Pollvo.Applications.EKS'

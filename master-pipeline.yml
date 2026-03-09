@@ -1,0 +1,58 @@
+# Node.js
+# Build a general Node.js project with npm.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+
+trigger:
+- master
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+- checkout: self
+  fetchDepth: 0
+
+- task: SonarCloudPrepare@1
+  inputs:
+    SonarCloud: 'SQ'
+    organization: 'rsm'
+    scannerMode: 'CLI'
+    configMode: 'manual'
+    cliProjectKey: 'RSMBrasilAcal_Pollvo.CanalDeDenuncias.Front'
+    cliProjectName: 'Pollvo.CanalDeDenuncias.Front'
+    cliSources: '.'
+
+- task: NodeTool@0
+  inputs:
+    versionSource: 'spec'
+    versionSpec: '19.x'
+  displayName: 'Install Node.js'
+
+- script: |
+    npm install
+    npm run build
+  displayName: 'npm install and build'
+
+- task: Docker@2
+  inputs:
+    repository: '062224190872.dkr.ecr.us-east-2.amazonaws.com/canaldenuncia'
+    command: 'build'
+    Dockerfile: 'Dockerfile'
+    tags: 'latest'
+
+- task: SonarCloudAnalyze@1
+  inputs:
+    jdkversion: 'JAVA_HOME_17_X64'
+
+- task: SonarCloudPublish@1
+  inputs:
+    pollingTimeoutSec: '300'
+
+- task: ECRPushImage@1
+  inputs:
+    awsCredentials: 'aws'
+    regionName: 'us-east-2'
+    imageSource: 'imagename'
+    sourceImageName: '062224190872.dkr.ecr.us-east-2.amazonaws.com/canaldenuncia'
+    repositoryName: 'canaldenuncia'
